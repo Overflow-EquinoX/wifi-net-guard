@@ -35,6 +35,7 @@ class WifiGuardService : Service() {
     private lateinit var fakeWiFiDetector: FakeWiFiDetector
     private val behaviorProfiler = BehaviorProfiler()
     private val notificationDecisionEngine = NotificationDecisionEngine()
+    private val activeThreatDetector = ActiveThreatDetector()
 
     private var currentSsid: String? = null
     private var currentBssid: String? = null
@@ -149,8 +150,28 @@ class WifiGuardService : Service() {
                             profile = profile
                         )
                     } else {
-                        // Start normal behavior tracking simulation (Layer 4)
-                        startBehaviorSimulation(profile)
+                        // Run Active Network Probes (DNS Hijack, Transparent Proxy, Rogue DNS)
+                        val activeNetwork = connectivityManager.activeNetwork
+                        val linkProps = connectivityManager.getLinkProperties(activeNetwork)
+                        val activeThreats = activeThreatDetector.performActiveScans(linkProps)
+                        
+                        var threatFound = false
+                        for (threat in activeThreats) {
+                            if (threat.isThreatDetected) {
+                                threatFound = true
+                                handleThreatDetected(
+                                    threatType = threat.threatType ?: "NETWORK_INTERCEPTION",
+                                    level = if (threat.severity == Severity.CRITICAL) 4 else if (threat.severity == Severity.HIGH) 3 else 2,
+                                    description = threat.description ?: "Aktif ağ taraması sırasında şüpheli bir durum tespit edildi.",
+                                    profile = profile
+                                )
+                            }
+                        }
+
+                        if (!threatFound) {
+                            // Start normal behavior tracking simulation (Layer 4)
+                            startBehaviorSimulation(profile)
+                        }
                     }
                 }
             }
