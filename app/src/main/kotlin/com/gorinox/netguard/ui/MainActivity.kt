@@ -83,6 +83,14 @@ class MainActivity : AppCompatActivity() {
     private lateinit var database: GorinoxDatabase
     private lateinit var viewModel: MainActivityViewModel
 
+    // VPN Permission Launcher
+    private val vpnPermissionLauncher = registerForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) {
+        // VPN permission requested. We start the service regardless.
+        startWifiGuardService()
+    }
+
     // Permission Launcher
     private val permissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
@@ -91,7 +99,7 @@ class MainActivity : AppCompatActivity() {
         val coarseLocationGranted = permissions[Manifest.permission.ACCESS_COARSE_LOCATION] ?: false
         
         if (fineLocationGranted || coarseLocationGranted) {
-            startWifiGuardService()
+            checkAndRequestVpnPermission()
         }
     }
 
@@ -125,9 +133,20 @@ class MainActivity : AppCompatActivity() {
         }
 
         if (allGranted) {
-            startWifiGuardService()
+            checkAndRequestVpnPermission()
         } else {
             permissionLauncher.launch(permissionsToRequest.toTypedArray())
+        }
+    }
+
+    private fun checkAndRequestVpnPermission() {
+        val vpnIntent = android.net.VpnService.prepare(this)
+        if (vpnIntent != null) {
+            // Permission is needed
+            vpnPermissionLauncher.launch(vpnIntent)
+        } else {
+            // Already granted or not needed
+            startWifiGuardService()
         }
     }
 

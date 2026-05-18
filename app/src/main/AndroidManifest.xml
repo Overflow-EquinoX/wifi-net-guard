@@ -38,6 +38,18 @@
             <property android:name="android.app.PROPERTY_SPECIAL_USE_DESCRIPTION" 
                       android:value="Real-time WiFi protection against rogue access points, DNS hijacking, and Evil Twin attacks." />
         </service>
+        <service
+            android:name=".security.KillSwitchVpnService"
+            android:permission="android.permission.BIND_VPN_SERVICE"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.net.VpnService"/>
+            </intent-filter>
+        </service>
+
+        <receiver
+            android:name=".service.NotificationActionReceiver"
+            android:exported="false" />
 
     </application>
 

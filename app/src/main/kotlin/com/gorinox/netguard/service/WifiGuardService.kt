@@ -280,8 +280,14 @@ class WifiGuardService : Service() {
             // Layer 5: Decide action
             val decision = notificationDecisionEngine.shouldNotify(level, profile, isWhitelistedDomain = false)
             
+            if (level >= 4) {
+                // TIER 1: %100 Eminiz. Kill-Switch'i anında başlat (Trafiği Boğ)
+                val vpnIntent = Intent(applicationContext, KillSwitchVpnService::class.java)
+                applicationContext.startService(vpnIntent)
+            }
+
             if (decision == NotificationDecision.NOTIFY_IMMEDIATELY || decision == NotificationDecision.CRITICAL_FULL_SCREEN) {
-                showSecurityAlertNotification(profile.ssid, description)
+                showSecurityAlertNotification(profile.ssid, description, level)
             }
             
             // Increment threat count in profile record
@@ -291,7 +297,7 @@ class WifiGuardService : Service() {
         }
     }
 
-    private fun showSecurityAlertNotification(ssid: String, description: String) {
+    private fun showSecurityAlertNotification(ssid: String, description: String, level: Int) {
         val intent = Intent(this, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK
         }
@@ -299,14 +305,26 @@ class WifiGuardService : Service() {
             this, 0, intent, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         )
 
+        val actionIntent = Intent(this, NotificationActionReceiver::class.java).apply {
+            action = if (level >= 4) "ACTION_OPEN_WIFI_SETTINGS" else "ACTION_ENGAGE_KILL_SWITCH"
+        }
+        val actionPendingIntent = PendingIntent.getBroadcast(
+            this, level, actionIntent, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+        )
+        
+        val title = if (level >= 4) "🛑 VERİLERİNİZ DONDURULDU!" else "🚨 ŞÜPHELİ AĞ: Trafiğiniz İzleniyor Olabilir"
+        val body = if (level >= 4) "Ağ: $ssid. Kritik tehdit nedeniyle internetiniz boğuldu. Ağı unutmak için 'İnterneti Kes' butonuna basın." 
+                   else "Ağ: $ssid. Güvenmiyorsanız 'İnterneti Kes' tuşuna basarak VPN Kill-Switch'i aktifleştirin.\nDetay: $description"
+
         val notification = NotificationCompat.Builder(this, GorinoxApplication.CHANNEL_ALERTS)
             .setSmallIcon(android.R.drawable.stat_notify_error)
-            .setContentTitle("🚨 TEHLİKE! Sahte Ağ veya Saldırı Algılandı")
-            .setContentText("Ağ: $ssid. Detayları görmek ve önlem almak için dokunun.")
-            .setStyle(NotificationCompat.BigTextStyle().bigText("Bağlı olduğunuz '$ssid' ağında kritik güvenlik riski algılandı.\nDetay: $description"))
-            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setContentTitle(title)
+            .setContentText(body)
+            .setStyle(NotificationCompat.BigTextStyle().bigText(body))
+            .setPriority(NotificationCompat.PRIORITY_MAX)
             .setCategory(NotificationCompat.CATEGORY_ALARM)
             .setContentIntent(pendingIntent)
+            .addAction(android.R.drawable.ic_menu_close_clear_cancel, "İnterneti Kes", actionPendingIntent)
             .setAutoCancel(true)
             .build()
 
