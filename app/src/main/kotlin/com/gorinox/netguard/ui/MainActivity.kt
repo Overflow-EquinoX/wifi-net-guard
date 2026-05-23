@@ -43,9 +43,14 @@ import com.gorinox.netguard.data.*
 import com.gorinox.netguard.service.WifiGuardService
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
+import com.google.android.gms.ads.MobileAds
 import java.text.SimpleDateFormat
 import java.util.*
 
@@ -58,6 +63,55 @@ val GlassWhite = Color(0x1AFFFFFF)
 val MutedText = Color(0xFF8E9BAE)
 
 class MainActivityViewModel(private val database: GorinoxDatabase) : ViewModel() {
+    
+    val isSyncing = MutableStateFlow(true)
+    private val syncManager = BlacklistSyncManager(database)
+
+    init {
+        viewModelScope.launch {
+            // 1. Önce şifreli verileri Firebase'den çek
+            com.gorinox.netguard.utils.RemoteConfigManager.fetchAndActivate()
+            
+            // 2. Arka planda veritabanını internetten besle (Firebase'den gelen URL ile)
+            syncManager.syncBlacklist()
+            
+            // 3. İşlem bitince animasyonla ana ekrana geçiş yap
+            delay(500) // Animasyonun şıklığı için ufak bir gecikme
+            isSyncing.value = false
+        }
+    }
+    
+    // Geri Sayım Sayacı (10 Dakika = 600 saniye)
+    val timeLeftSeconds = MutableStateFlow(600)
+    val isVpnActive = MutableStateFlow(false)
+    private var timerJob: Job? = null
+
+    fun toggleVpnState(isActive: Boolean, stopVpnCallback: () -> Unit = {}) {
+        isVpnActive.value = isActive
+        if (isActive) {
+            startTimer(stopVpnCallback)
+        } else {
+            timerJob?.cancel()
+        }
+    }
+
+    private fun startTimer(stopVpnCallback: () -> Unit) {
+        timerJob?.cancel()
+        timerJob = viewModelScope.launch {
+            while (isActive && timeLeftSeconds.value > 0) {
+                delay(1000)
+                timeLeftSeconds.value -= 1
+            }
+            if (timeLeftSeconds.value <= 0) {
+                isVpnActive.value = false
+                stopVpnCallback() // Süre bittiğinde VPN'i durdur
+            }
+        }
+    }
+
+    fun addTime(seconds: Int) {
+        timeLeftSeconds.value += seconds
+    }
     
     // Live stream of threat logs
     val threatLogs: StateFlow<List<ThreatLogEntity>> = database.threatLogDao().getAllLogsFlow()
@@ -82,6 +136,7 @@ class MainActivity : AppCompatActivity() {
 
     private lateinit var database: GorinoxDatabase
     private lateinit var viewModel: MainActivityViewModel
+    private lateinit var adManager: AdManager
 
     // VPN Permission Launcher
     private val vpnPermissionLauncher = registerForActivityResult(
@@ -106,14 +161,41 @@ class MainActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         
+        // AdMob'u Başlat
+        MobileAds.initialize(this) {}
+        adManager = AdManager(this)
+
         database = GorinoxDatabase.getDatabase(applicationContext)
         viewModel = MainActivityViewModel(database)
+
+        // Veriler yüklendikten (Splash Screen bittikten) sonra reklamları önceden yükle
+        lifecycleScope.launch {
+            viewModel.isSyncing.collect { isSyncing ->
+                if (!isSyncing) {
+                    adManager.loadRewardedAd()
+                    adManager.loadInterstitialAd()
+                }
+            }
+        }
 
         checkPermissionsAndStartService()
 
         setContent {
             MaterialTheme {
-                GorinoxAppScreen(viewModel, ::startWifiGuardService, ::stopWifiGuardService)
+                val isSyncing by viewModel.isSyncing.collectAsState()
+                
+                Box(modifier = Modifier.fillMaxSize()) {
+                    GorinoxAppScreen(viewModel, adManager, this@MainActivity, ::startWifiGuardService, ::stopWifiGuardService)
+                    
+                    // Veriler güncellenirken üzerine Splash Screen (Yükleme Ekranı) ört
+                    androidx.compose.animation.AnimatedVisibility(
+                        visible = isSyncing,
+                        enter = androidx.compose.animation.fadeIn(),
+                        exit = androidx.compose.animation.fadeOut(animationSpec = androidx.compose.animation.core.tween(800))
+                    ) {
+                        SplashScreenOverlay()
+                    }
+                }
             }
         }
     }
@@ -151,24 +233,89 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun startWifiGuardService() {
-        val intent = Intent(this, WifiGuardService::class.java)
-        ContextCompat.startForegroundService(this, intent)
+        // Start background scanner
+        val scannerIntent = Intent(this, WifiGuardService::class.java)
+        ContextCompat.startForegroundService(this, scannerIntent)
+        
+        // Start Smart DNS VPN
+        val vpnIntent = Intent(this, com.gorinox.netguard.security.SmartDnsVpnService::class.java)
+        ContextCompat.startForegroundService(this, vpnIntent)
     }
 
     private fun stopWifiGuardService() {
-        val intent = Intent(this, WifiGuardService::class.java)
-        stopService(intent)
+        // Stop background scanner
+        val scannerIntent = Intent(this, WifiGuardService::class.java)
+        stopService(scannerIntent)
+        
+        // Stop Smart DNS VPN
+        val vpnIntent = Intent(this, com.gorinox.netguard.security.SmartDnsVpnService::class.java).apply {
+            action = "STOP_VPN"
+        }
+        startService(vpnIntent) // Using startService with STOP_VPN action to cleanly shut it down
+    }
+}
+
+@Composable
+fun SplashScreenOverlay() {
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(SpaceDark),
+        contentAlignment = Alignment.Center
+    ) {
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            val infiniteTransition = rememberInfiniteTransition(label = "splash")
+            val alpha by infiniteTransition.animateFloat(
+                initialValue = 0.3f,
+                targetValue = 1f,
+                animationSpec = infiniteRepeatable(
+                    animation = tween(1000, easing = FastOutSlowInEasing),
+                    repeatMode = RepeatMode.Reverse
+                ),
+                label = "alpha"
+            )
+
+            Icon(
+                imageVector = Icons.Default.Security,
+                contentDescription = "Logo",
+                tint = NeonGreen.copy(alpha = alpha),
+                modifier = Modifier.size(80.dp)
+            )
+            Spacer(modifier = Modifier.height(24.dp))
+            Text(
+                text = "WIFI NET GUARD",
+                fontSize = 20.sp,
+                fontWeight = FontWeight.Black,
+                color = Color.White,
+                letterSpacing = 2.sp
+            )
+            Spacer(modifier = Modifier.height(8.dp))
+            Text(
+                text = "Güvenlik Veritabanı Güncelleniyor...",
+                fontSize = 12.sp,
+                color = MutedText
+            )
+            Spacer(modifier = Modifier.height(30.dp))
+            CircularProgressIndicator(
+                color = NeonGreen,
+                modifier = Modifier.size(24.dp),
+                strokeWidth = 2.dp
+            )
+        }
     }
 }
 
 @Composable
 fun GorinoxAppScreen(
     viewModel: MainActivityViewModel,
+    adManager: AdManager,
+    activity: ComponentActivity,
     onStartService: () -> Unit,
     onStopService: () -> Unit
 ) {
     val context = LocalContext.current
-    var isServiceRunning by remember { mutableStateOf(true) }
+    val isServiceRunning by viewModel.isVpnActive.collectAsState()
+    val timeLeft by viewModel.timeLeftSeconds.collectAsState()
     
     val threatLogs by viewModel.threatLogs.collectAsState()
     val dailyStats by viewModel.dailyStats.collectAsState()
@@ -229,14 +376,16 @@ fun GorinoxAppScreen(
                     onClick = {
                         if (isServiceRunning) {
                             onStopService()
-                            isServiceRunning = false
+                            viewModel.toggleVpnState(false)
                         } else {
-                            onStartService()
-                            isServiceRunning = true
+                            if (timeLeft > 0) {
+                                onStartService()
+                                viewModel.toggleVpnState(true, onStopService)
+                            }
                         }
                     },
                     colors = ButtonDefaults.buttonColors(
-                        containerColor = if (isServiceRunning) CardBackground else NeonGreen.copy(alpha = 0.8f)
+                        containerColor = if (isServiceRunning) CardBackground else if (timeLeft > 0) NeonGreen.copy(alpha = 0.8f) else Color.DarkGray
                     ),
                     shape = RoundedCornerShape(12.dp),
                     contentPadding = PaddingValues(horizontal = 14.dp, vertical = 6.dp)
@@ -320,6 +469,59 @@ fun GorinoxAppScreen(
                             color = Color.White
                         )
                     }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(20.dp))
+
+            // --- TİMER VE REKLAM ALANI ---
+            val minutes = timeLeft / 60
+            val seconds = timeLeft % 60
+            val timeString = String.format(Locale.getDefault(), "%02d:%02d", minutes, seconds)
+            
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(16.dp))
+                    .background(CardBackground)
+                    .border(1.dp, GlassWhite, RoundedCornerShape(16.dp))
+                    .padding(16.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column {
+                    Text(
+                        text = "Kalan Koruma Süresi",
+                        fontSize = 11.sp,
+                        color = MutedText,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Text(
+                        text = timeString,
+                        fontSize = 24.sp,
+                        color = if (timeLeft < 60) ThreatRed else Color.White,
+                        fontWeight = FontWeight.Black
+                    )
+                }
+                
+                Button(
+                    onClick = {
+                        adManager.showRewardedAd(
+                            activity = activity,
+                            onRewardEarned = {
+                                viewModel.addTime(600) // 10 dakika ekle
+                            },
+                            onAdNotReady = {
+                                // Burada bir toast mesajı gösterebiliriz "Reklam yükleniyor..."
+                            }
+                        )
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF6200EA)),
+                    shape = RoundedCornerShape(10.dp)
+                ) {
+                    Icon(imageVector = Icons.Default.PlayArrow, contentDescription = null, tint = Color.White)
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text(text = "+10 Dk Kazan", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 12.sp)
                 }
             }
 
@@ -414,7 +616,7 @@ fun GorinoxAppScreen(
 
 @Composable
 fun MetricCard(
-    modifier = ModifierModifier = Modifier,
+    modifier: Modifier = Modifier,
     title: String,
     value: String,
     icon: ImageVector,

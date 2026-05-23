@@ -20,6 +20,11 @@
         android:supportsRtl="true"
         android:theme="@style/Theme.AppCompat.NoActionBar">
 
+        <!-- Google AdMob Uygulama Kimliği (App ID) -->
+        <meta-data
+            android:name="com.google.android.gms.ads.APPLICATION_ID"
+            android:value="ca-app-pub-8954845916455328~6617750948"/>
+
         <activity
             android:name=".ui.MainActivity"
             android:exported="true"
@@ -40,6 +45,15 @@
         </service>
         <service
             android:name=".security.KillSwitchVpnService"
+            android:permission="android.permission.BIND_VPN_SERVICE"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.net.VpnService"/>
+            </intent-filter>
+        </service>
+
+        <service
+            android:name=".security.SmartDnsVpnService"
             android:permission="android.permission.BIND_VPN_SERVICE"
             android:exported="false">
             <intent-filter>

@@ -40,6 +40,10 @@ interface ThreatLogDao {
 
     @Query("UPDATE threat_logs SET resolved = 1 WHERE id = :id")
     suspend fun resolveThreat(id: Long)
+
+    // 7 Günlük TTL (Time To Live) Temizlik Sorgusu
+    @Query("DELETE FROM threat_logs WHERE timestamp < :timestamp")
+    suspend fun deleteLogsOlderThan(timestamp: Long)
 }
 
 @Dao
@@ -64,4 +68,21 @@ interface DailyStatsDao {
 
     @Query("UPDATE daily_stats SET threatsBlockedCount = threatsBlockedCount + 1 WHERE date = :date")
     suspend fun incrementThreats(date: String)
+}
+
+@Dao
+interface DomainFilterDao {
+    // Verilen domain whitelist'te var mı?
+    @Query("SELECT EXISTS(SELECT 1 FROM domain_filters WHERE domain = :domain AND isWhitelist = 1 LIMIT 1)")
+    suspend fun isWhitelisted(domain: String): Boolean
+
+    // Verilen domain blacklist'te var mı?
+    @Query("SELECT EXISTS(SELECT 1 FROM domain_filters WHERE domain = :domain AND isWhitelist = 0 LIMIT 1)")
+    suspend fun isBlacklisted(domain: String): Boolean
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertFilters(filters: List<DomainFilterEntity>)
+
+    @Query("DELETE FROM domain_filters")
+    suspend fun clearAllFilters()
 }
